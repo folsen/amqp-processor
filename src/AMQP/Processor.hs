@@ -35,26 +35,26 @@ type DelayDuration = Int
 type RoutingKey = T.Text
 
 newtype QueueName = QueueName { fromQueueName :: String }
-    deriving (Eq, Show, Read, IsString)
+  deriving (Eq, Show, Read, IsString)
 
 data RetryStatus = DoRetry Int | DontRetry
 
 data MessagePayload a = MessagePayload
-    { retries :: Int
-    , payload :: a
-    } deriving (Show, Generic)
+  { retries :: Int
+  , payload :: a
+  } deriving (Show, Generic)
 
 instance JSON.FromJSON a => JSON.FromJSON (MessagePayload a)
 instance JSON.ToJSON a => JSON.ToJSON (MessagePayload a)
 
 data ProcessingResponse = ProcessingSuccess | ProcessingRetry String
-    deriving (Show)
+  deriving (Show)
 
 data ProcessingOpts = ProcessingOpts
-    { processQueueName   :: String
-    , processRetryPolicy :: RetryPolicy
-    , processWorkerFn    :: JSON.Value -> IO (JSON.Result ProcessingResponse)
-    }
+  { processQueueName   :: String
+  , processRetryPolicy :: RetryPolicy
+  , processWorkerFn    :: JSON.Value -> IO (JSON.Result ProcessingResponse)
+  }
 
 type RetryPolicy = Integer -> RetryStatus
 
@@ -73,11 +73,11 @@ process :: JSON.FromJSON a
         -> (a -> IO ProcessingResponse)
         -> IO ()
 process q p f =
-    processOptions $ ProcessingOpts
-        { processQueueName   = fromQueueName q
-        , processRetryPolicy = p
-        , processWorkerFn    = traverse f . JSON.parse JSON.parseJSON
-        }
+  processOptions $ ProcessingOpts
+    { processQueueName   = fromQueueName q
+    , processRetryPolicy = p
+    , processWorkerFn    = traverse f . JSON.parse JSON.parseJSON
+    }
 
 processOptions :: ProcessingOpts -> IO ()
 processOptions opts = do
