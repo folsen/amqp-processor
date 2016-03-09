@@ -162,7 +162,7 @@ attemptRetry conn (msg, env) opts e = do
       case processRetryPolicy opts count of
         DoRetry delay -> do
           let increasedCount = (msgBody msg) & key "retries" .~ JSON.Number (fromIntegral $ count + 1)
-          putStrLn $ "Requeuing message to happen resend in " ++ show delay ++ "ms"
+          putStrLn $ "Requeuing message to resend in " ++ show delay ++ "ms"
           postDelayed conn (newMsg {msgBody = increasedCount}) delay (T.pack $ processQueueName opts)
         DontRetry -> do
           putStrLn $ "Maximum number of retries have been reached. Throwing message away"
