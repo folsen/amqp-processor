@@ -1,0 +1,40 @@
+name:                amqp-processor
+version:             0.1.0.0
+synopsis:            Provide an easy way to set up a queue processor with AMQP
+description:         Please see README.md
+homepage:            http://github.com/folsen/amqp-processor
+license:             BSD3
+license-file:        LICENSE
+author:              Fredrik Olsen
+maintainer:          fredrik@dekompile.com
+copyright:           2016 Fredrik Olsen
+category:            Network
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     AMQP.Processor
+  build-depends:       base >= 4.7 && < 5
+                     , amqp
+                     , containers
+                     , text
+                     , unix
+                     , aeson >= 0.11
+                     , lens
+                     , lens-aeson
+  default-language:    Haskell2010
+
+test-suite amqp-processor-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  build-depends:       base
+                     , amqp-processor
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/folsen/amqp-processor
