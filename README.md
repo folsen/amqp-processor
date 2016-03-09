@@ -33,17 +33,7 @@ instance JSON.FromJSON QueueItem
 instance JSON.ToJSON QueueItem
 
 main :: IO ()
-main = do
-  let processingOpts = ProcessingOpts {
-        processWorkerFn    = myFn
-      , processQueueName   = "queue_name"
-      , processRetryPolicy = retryPolicy
-      }
-
-  process processingOpts
-
-myFn :: QueueItem -> IO ProcessingResponse
-myFn i = do
+main = process "queue_name" retryPolicy $ \i -> do
   putStrLn $ "Processing item: " ++ show i
   return $ ProcessingSuccess
 

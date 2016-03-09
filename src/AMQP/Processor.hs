@@ -1,57 +1,60 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE StandaloneDeriving         #-}
 
 module AMQP.Processor
   ( process
   , RetryStatus(..)
   , ProcessingResponse(..)
-  , ProcessingOpts(..)
   )
   where
 
-import Control.Concurrent
-import Control.Concurrent.MVar (putMVar, newEmptyMVar, readMVar, MVar)
-import Control.Exception
-import Control.Lens ((^?), (.~), (&))
-import Data.Aeson.Lens (key, _Integer)
-import Data.Maybe
-import Data.Monoid
-import GHC.Generics
-import Network.AMQP
-import Network.AMQP.Types
-import System.Posix.Signals (installHandler, Handler(Catch), sigINT, sigTERM)
-import System.Environment
-import qualified Data.Aeson as JSON
-import qualified Data.Map as Map
-import qualified Data.Text as T
+import           Control.Concurrent
+import           Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, readMVar)
+import           Control.Exception
+import           Control.Lens            ((&), (.~), (^?))
+import           Control.Monad
+import qualified Data.Aeson              as JSON
+import           Data.Aeson.Lens         (key, _Integer)
+import qualified Data.Aeson.Types        as JSON (Result (..), parse)
+import qualified Data.Map                as Map
+import           Data.Maybe
+import           Data.Monoid
+import           Data.String
+import qualified Data.Text               as T
+import           GHC.Generics
+import           Network.AMQP
+import           Network.AMQP.Types
+import           System.Environment
+import           System.Posix.Signals    (Handler (Catch), installHandler,
+                                          sigINT, sigTERM)
 
 type DelayDuration = Int
 type RoutingKey = T.Text
-type QueueName = String
+
+newtype QueueName = QueueName { fromQueueName :: String }
+    deriving (Eq, Show, Read, IsString)
 
 data RetryStatus = DoRetry Int | DontRetry
 
 data MessagePayload a = MessagePayload
-  { retries :: Int
-  , payload :: a
-  } deriving (Show, Generic)
+    { retries :: Int
+    , payload :: a
+    } deriving (Show, Generic)
 
 instance JSON.FromJSON a => JSON.FromJSON (MessagePayload a)
 instance JSON.ToJSON a => JSON.ToJSON (MessagePayload a)
 
 data ProcessingResponse = ProcessingSuccess | ProcessingRetry String
-  deriving (Show)
+    deriving (Show)
 
--- Tried a GADT here because I didn't want to have to write
--- `JSON.FromJSON a =>` on every function, but I can't get it to work.
-data ProcessingOpts a where
-  ProcessingOpts :: JSON.FromJSON a => {
-      processWorkerFn :: a -> IO ProcessingResponse
-    , processQueueName :: String
+data ProcessingOpts = ProcessingOpts
+    { processQueueName   :: String
     , processRetryPolicy :: RetryPolicy
-    } -> ProcessingOpts a
+    , processWorkerFn    :: JSON.Value -> IO (JSON.Result ProcessingResponse)
+    }
 
 type RetryPolicy = Integer -> RetryStatus
 
@@ -64,20 +67,32 @@ defaultRetryPolicy 4 = DoRetry 8000
 defaultRetryPolicy 5 = DoRetry 16000
 defaultRetryPolicy _ = DontRetry
 
-process :: JSON.FromJSON a => ProcessingOpts a -> IO ()
-process opts = do
+process :: JSON.FromJSON a
+        => QueueName
+        -> RetryPolicy
+        -> (a -> IO ProcessingResponse)
+        -> IO ()
+process q p f =
+    processOptions $ ProcessingOpts
+        { processQueueName   = fromQueueName q
+        , processRetryPolicy = p
+        , processWorkerFn    = traverse f . JSON.parse JSON.parseJSON
+        }
+
+processOptions :: ProcessingOpts -> IO ()
+processOptions opts = do
   -- Exceptions that can happen here are AMQP exceptions,
-  -- like loosing connection
+  -- like losing connection
   catch (subscribeToQueue opts)
         (retryOpening opts)
 
-retryOpening :: JSON.FromJSON a => ProcessingOpts a -> SomeException -> IO ()
+retryOpening :: ProcessingOpts -> SomeException -> IO ()
 retryOpening opts e = do
   putStrLn $ "Exception occurred from AMQP thread (restarting in 5s): " ++ show e
   threadDelay 5000000 -- 5s
-  process opts
+  processOptions opts
 
-subscribeToQueue :: JSON.FromJSON a => ProcessingOpts a -> IO ()
+subscribeToQueue :: ProcessingOpts -> IO ()
 subscribeToQueue opts = do
   -- Read AMQP_URL from environment and use that.
   -- If the variable is empty, the defaults will be used (localhost)
@@ -85,7 +100,7 @@ subscribeToQueue opts = do
   let connectionOpts = fromURI $ fromMaybe "" amqpUrl
   -- Open connection and add a handler to restart if its closed
   conn <- openConnection'' connectionOpts
-  addConnectionClosedHandler conn True (process opts)
+  addConnectionClosedHandler conn True (processOptions opts)
   -- Open channel and add handler if any exception occurrs
   chan <- openChannel conn
   addChannelExceptionHandler chan (closeAndRetry conn opts)
@@ -109,34 +124,37 @@ closeConnectionOnInterrupt conn var = do
   closeConnection conn
   putStrLn "connection closed"
 
-closeAndRetry :: JSON.FromJSON a => Connection -> ProcessingOpts a -> SomeException -> IO ()
+closeAndRetry :: Connection -> ProcessingOpts -> SomeException -> IO ()
 closeAndRetry conn opts e = do
   closeConnection conn
   putStrLn "connection closed"
   retryOpening opts e
 
-workHandler :: JSON.FromJSON a => Connection -> ProcessingOpts a -> (Message,Envelope) -> IO ()
+workHandler :: Connection -> ProcessingOpts -> (Message,Envelope) -> IO ()
 workHandler conn opts pkg = do
   forkIO $ catch
     (fnWrapper conn pkg opts)
     (attemptRetry conn pkg opts)
   return ()
 
-fnWrapper :: JSON.FromJSON a => Connection -> (Message,Envelope) -> ProcessingOpts a -> IO ()
+fnWrapper :: Connection -> (Message, Envelope) -> ProcessingOpts -> IO ()
 fnWrapper conn (msg, env) opts = do
   putStrLn $ "processing message with envelope delivery tag: " ++ show (envDeliveryTag env)
   let eObj = JSON.eitherDecode (msgBody msg)
-  case eObj of
-    Left error -> do
-      putStrLn $ "message does not contain valid JSON (" ++ error ++ "), throwing it away"
+  case eObj :: Either String (MessagePayload JSON.Value) of
+    Left err -> do
+      putStrLn $ "message does not contain valid JSON (" ++ err ++ "), throwing it away"
       ackEnv env
     Right obj -> do
       response <- processWorkerFn opts $ payload obj
       case response of
-        ProcessingSuccess -> ackEnv env
-        ProcessingRetry e -> error e
+        JSON.Success ProcessingSuccess   -> ackEnv env
+        JSON.Success (ProcessingRetry e) -> error e
+        JSON.Error err -> do
+          putStrLn $ "message payload does not contain valid JSON (" ++ err ++ "), throwing it away"
+          ackEnv env
 
-attemptRetry :: Connection -> (Message, Envelope) -> ProcessingOpts a -> SomeException -> IO ()
+attemptRetry :: Connection -> (Message, Envelope) -> ProcessingOpts -> SomeException -> IO ()
 attemptRetry conn (msg, env) opts e = do
   putStrLn $ "Exception in worker task: " ++ show e
   case (msgBody msg) ^? key "retries" . _Integer of
